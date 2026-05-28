@@ -3,6 +3,7 @@ import anthropic
 from tavily import TavilyClient
 import requests
 import re
+import json
 import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -86,7 +87,6 @@ st.markdown("""
     }
 
     [data-testid="stChatMessage"] { padding: 0.8rem 0; }
-
     .stSpinner > div { border-top-color: #00E5D4 !important; }
 
     .api-badge {
@@ -96,7 +96,7 @@ st.markdown("""
         font-weight: 700;
         padding: 0.1rem 0.4rem;
         border-radius: 4px;
-        margin-left: 0.3rem;
+        margin-left: 0.4rem;
         vertical-align: middle;
     }
 </style>
@@ -111,30 +111,35 @@ def get_clients():
 
 tavily_client, claude_client = get_clients()
 
-# ── Fuentes por tipo ──────────────────────────────────────────────────────────
+# ── Fuentes por tipo de búsqueda ─────────────────────────────────────────────
 DOMINIOS = {
     "Legislación": [
-        "boe.es", "congreso.es", "senado.es", "mjusticia.gob.es",
-        "eur-lex.europa.eu", "agenciatributaria.es", "seg-social.es",
+        "boe.es", "eur-lex.europa.eu", "congreso.es", "senado.es",
+        "mjusticia.gob.es", "agenciatributaria.es", "seg-social.es",
         "sepe.es", "noticias.juridicas.com", "iberley.es", "abogacia.es"
     ],
     "Jurisprudencia": [
-        "poderjudicial.es", "mjusticia.gob.es", "boe.es",
+        "poderjudicial.es", "tribunalconstitucional.es", "hudoc.echr.coe.int",
+        "boe.es", "eur-lex.europa.eu", "mjusticia.gob.es",
         "abogacia.es", "iberley.es", "noticias.juridicas.com"
     ],
     "Consulta general": [
-        "boe.es", "poderjudicial.es", "congreso.es", "eur-lex.europa.eu",
+        "boe.es", "poderjudicial.es", "tribunalconstitucional.es",
+        "hudoc.echr.coe.int", "eur-lex.europa.eu", "congreso.es",
         "mjusticia.gob.es", "agenciatributaria.es", "seg-social.es",
         "sepe.es", "noticias.juridicas.com", "iberley.es", "abogacia.es"
     ]
 }
 
 # Fuentes con integración API directa
-FUENTES_API_DIRECTA = {"boe.es", "eur-lex.europa.eu"}
+FUENTES_API_DIRECTA = {
+    "boe.es", "eur-lex.europa.eu",
+    "poderjudicial.es", "tribunalconstitucional.es", "hudoc.echr.coe.int"
+}
 
 SUFIJOS = {
-    "Legislación":     "legislación ley España BOE normativa",
-    "Jurisprudencia":  "jurisprudencia sentencia tribunal España CENDOJ",
+    "Legislación":      "legislación ley España BOE normativa",
+    "Jurisprudencia":   "jurisprudencia sentencia tribunal España",
     "Consulta general": "derecho España jurídico legal normativa"
 }
 
@@ -159,76 +164,76 @@ Formato de respuesta:
 - Referencias a fuentes entre corchetes: [Fuente 1], [Fuente 2]...
 - Advertencia de vigencia al final"""
 
-# ── Búsqueda Tavily (sin filtro de dominio para máxima cobertura) ─────────────
+# ── Headers comunes ───────────────────────────────────────────────────────────
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; LegalAssistant/2.0)"}
+
+# ── 1. Tavily — búsqueda amplia sin filtro de dominio ─────────────────────────
 def buscar_tavily(query: str, tipo: str) -> list:
     sufijo = SUFIJOS.get(tipo, "")
     try:
-        results = tavily_client.search(
+        res = tavily_client.search(
             query=f"{query} {sufijo}",
             search_depth="advanced",
-            max_results=7,
+            max_results=6,
         )
-        return results.get("results", [])
+        return res.get("results", [])
     except Exception:
         return []
 
-# ── BOE — API datos abiertos + buscador oficial ───────────────────────────────
+# ── 2. BOE — API datos abiertos + buscador oficial ───────────────────────────
 def buscar_boe_directo(query: str) -> list:
     results = []
 
-    # 1. Buscador BOE (normativa vigente)
+    # Buscador de normativa vigente
     try:
         r = requests.get(
             "https://www.boe.es/buscar/act.php",
             params={"p": query, "tipo": "all", "accion": "Buscar"},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; LegalAssistant/1.0)"},
+            headers=HEADERS,
             timeout=10
         )
         if r.status_code == 200:
-            # Extraer enlaces de resultados de normativa
             for m in re.finditer(r'href="(/buscar/act/[^"]+)"', r.text):
                 href = m.group(1)
-                # Obtener texto circundante para extraer título
-                start = max(0, m.end())
-                snippet = r.text[start:start + 300]
-                title_m = re.search(r'>\s*([^<]{15,200}?)\s*<', snippet)
-                if title_m:
-                    title = title_m.group(1).strip()
-                    if len(title) > 15 and not title.startswith('http'):
+                snippet = r.text[m.end():m.end() + 300]
+                t = re.search(r'>\s*([^<]{15,200}?)\s*<', snippet)
+                if t:
+                    title = t.group(1).strip()
+                    if len(title) > 15:
                         results.append({
-                            'title': f"BOE (normativa): {title}",
+                            'title': f"BOE: {title}",
                             'url': f"https://www.boe.es{href}",
-                            'content': f"Normativa en vigor publicada en el BOE: {title}."
+                            'content': f"Normativa BOE: {title}."
                         })
                         if len(results) >= 3:
                             break
     except Exception:
         pass
 
-    # 2. API datos abiertos — sumario de hoy
+    # API datos abiertos — sumario de hoy
     try:
         today = datetime.now().strftime('%Y%m%d')
         r2 = requests.get(
             f"https://www.boe.es/datosabiertos/api/boe/sumario/{today}",
-            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+            headers={**HEADERS, "Accept": "application/json"},
             timeout=8
         )
         if r2.status_code == 200:
             data = r2.json()
-            keywords = [w.lower() for w in query.split() if len(w) > 3]
+            kws = [w.lower() for w in query.split() if len(w) > 3]
 
             def scan(obj, depth=0):
                 if depth > 10 or len(results) >= 5:
                     return
                 if isinstance(obj, dict):
                     titulo = obj.get('titulo', '')
-                    if titulo and any(kw in titulo.lower() for kw in keywords):
+                    if titulo and any(k in titulo.lower() for k in kws):
                         url_doc = obj.get('urlHtml', '') or obj.get('urlPdf', '')
                         if isinstance(url_doc, dict):
                             url_doc = url_doc.get('#text', '') or url_doc.get('@attr', '')
                         results.append({
                             'title': f"BOE {today}: {titulo}",
-                            'url': f"https://www.boe.es{url_doc}" if url_doc and url_doc.startswith('/') else "https://www.boe.es",
+                            'url': f"https://www.boe.es{url_doc}" if url_doc and str(url_doc).startswith('/') else "https://www.boe.es",
                             'content': f"Publicado en BOE el {today}: {titulo}."
                         })
                     for v in obj.values():
@@ -243,37 +248,34 @@ def buscar_boe_directo(query: str) -> list:
 
     return results[:4]
 
-# ── EUR-Lex — buscador oficial + SPARQL ──────────────────────────────────────
+# ── 3. EUR-Lex — buscador oficial + SPARQL ───────────────────────────────────
 def buscar_eurlex_directo(query: str) -> list:
     results = []
 
-    # 1. Buscador web EUR-Lex
+    # Buscador web EUR-Lex
     try:
         r = requests.get(
             "https://eur-lex.europa.eu/search.html",
             params={"type": "quick", "text": query, "lang": "es"},
-            headers={"User-Agent": "Mozilla/5.0 (compatible)"},
+            headers=HEADERS,
             timeout=12
         )
         if r.status_code == 200:
-            # Extraer enlaces a documentos de contenido legal
             seen = set()
             for m in re.finditer(
                 r'href="(https://eur-lex\.europa\.eu/legal-content/[^"]+)"',
                 r.text
             ):
-                url = m.group(1).split('?')[0]  # quitar parámetros
+                url = m.group(1).split('?')[0]
                 if url in seen:
                     continue
                 seen.add(url)
-                # Extraer título del contexto
-                start = max(0, m.end())
-                snippet = r.text[start:start + 400]
-                title_m = re.search(r'title="([^"]{10,200})"', snippet) or \
-                          re.search(r'>\s*([^<]{15,200}?)\s*</', snippet)
-                if title_m:
-                    title = re.sub(r'\s+', ' ', title_m.group(1)).strip()
-                    if title and 'EUR-Lex' not in title:
+                snippet = r.text[m.end():m.end() + 400]
+                t = re.search(r'title="([^"]{10,200})"', snippet) or \
+                    re.search(r'>\s*([^<]{15,200}?)\s*</', snippet)
+                if t:
+                    title = re.sub(r'\s+', ' ', t.group(1)).strip()
+                    if title:
                         results.append({
                             'title': f"EUR-Lex: {title}",
                             'url': url,
@@ -284,13 +286,13 @@ def buscar_eurlex_directo(query: str) -> list:
     except Exception:
         pass
 
-    # 2. SPARQL Publications Office (fallback si no hay resultados HTML)
+    # SPARQL fallback
     if not results:
         try:
-            keywords = [w for w in query.split() if len(w) > 4][:2]
-            if keywords:
+            kws = [w for w in query.split() if len(w) > 4][:2]
+            if kws:
                 filter_str = " && ".join(
-                    [f'CONTAINS(LCASE(STR(?title)), "{kw.lower()}")' for kw in keywords]
+                    [f'CONTAINS(LCASE(STR(?title)), "{k.lower()}")' for k in kws]
                 )
                 sparql = f"""
 PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
@@ -308,8 +310,7 @@ SELECT DISTINCT ?work ?title ?date WHERE {{
                     timeout=15
                 )
                 if r2.status_code == 200:
-                    data = r2.json()
-                    for b in data.get('results', {}).get('bindings', []):
+                    for b in r2.json().get('results', {}).get('bindings', []):
                         title = b.get('title', {}).get('value', '')
                         work  = b.get('work',  {}).get('value', '')
                         date  = b.get('date',  {}).get('value', '')[:10]
@@ -317,31 +318,151 @@ SELECT DISTINCT ?work ?title ?date WHERE {{
                             results.append({
                                 'title': f"EUR-Lex: {title} ({date})",
                                 'url': work,
-                                'content': f"Legislación europea: {title}. Fecha: {date}. Fuente: Publications Office / EUR-Lex."
+                                'content': f"Legislación europea: {title}. Fecha: {date}."
                             })
         except Exception:
             pass
 
     return results[:3]
 
+# ── 4. CENDOJ — Centro de Documentación Judicial ─────────────────────────────
+def buscar_cendoj(query: str) -> list:
+    results = []
+    try:
+        r = requests.get(
+            "https://www.poderjudicial.es/search/indexAN.jsp",
+            params={"texto": query, "secc": "1"},
+            headers=HEADERS,
+            timeout=12
+        )
+        if r.status_code == 200:
+            for m in re.finditer(r'href="(/search/AN/openCDocument\.do\?[^"]+)"', r.text):
+                href = m.group(1)
+                snippet = r.text[m.end():m.end() + 400]
+                t = re.search(r'>\s*([^<]{10,200}?)\s*<', snippet)
+                if t:
+                    title = re.sub(r'\s+', ' ', t.group(1)).strip()
+                    if len(title) > 10:
+                        results.append({
+                            'title': f"CENDOJ: {title}",
+                            'url': f"https://www.poderjudicial.es{href}",
+                            'content': f"Jurisprudencia CENDOJ (Poder Judicial): {title}."
+                        })
+                        if len(results) >= 3:
+                            break
+    except Exception:
+        pass
+    return results
+
+# ── 5. Tribunal Constitucional ────────────────────────────────────────────────
+def buscar_tc(query: str) -> list:
+    results = []
+    try:
+        r = requests.get(
+            "https://hj.tribunalconstitucional.es/es/Resolucion/Buscar",
+            params={"texto": query},
+            headers=HEADERS,
+            timeout=12
+        )
+        if r.status_code == 200:
+            for m in re.finditer(r'href="(/es/Resolucion/Show/(\d+))"', r.text):
+                href = m.group(1)
+                snippet = r.text[m.end():m.end() + 400]
+                t = re.search(r'>\s*([^<]{10,200}?)\s*</[^>]+>', snippet)
+                if t:
+                    title = re.sub(r'\s+', ' ', t.group(1)).strip()
+                    if len(title) > 5:
+                        results.append({
+                            'title': f"TC: {title}",
+                            'url': f"https://hj.tribunalconstitucional.es{href}",
+                            'content': f"Resolución del Tribunal Constitucional: {title}."
+                        })
+                        if len(results) >= 3:
+                            break
+    except Exception:
+        pass
+    return results
+
+# ── 6. HUDOC — Tribunal Europeo de Derechos Humanos ──────────────────────────
+def buscar_hudoc(query: str) -> list:
+    results = []
+    try:
+        params = {
+            "query": json.dumps({
+                "fulltext": [query],
+                "documentcollectionid2": ["GRANDCHAMBER", "CHAMBER", "JUDGMENTS"]
+            }),
+            "select": json.dumps({
+                "itemid": 1,
+                "docname": 1,
+                "conclusion": 1,
+                "importance": 1,
+                "kpdate": 1,
+                "respondent": 1
+            }),
+            "sort": json.dumps({"kpdate": "Descending"}),
+            "start": 0,
+            "length": 4
+        }
+        r = requests.get(
+            "https://hudoc.echr.coe.int/app/query/results",
+            params=params,
+            headers={**HEADERS, "Accept": "application/json"},
+            timeout=15
+        )
+        if r.status_code == 200:
+            data = r.json()
+            # Navegar estructura de respuesta HUDOC
+            hits = data
+            for key in ['results', 'hits', 'hits']:
+                if isinstance(hits, dict):
+                    hits = hits.get(key, hits)
+            if not isinstance(hits, list):
+                hits = []
+
+            for hit in hits[:4]:
+                src = hit.get('_source', hit)
+                docname = src.get('docname', '')
+                itemid  = src.get('itemid', '')
+                conc    = src.get('conclusion', '')
+                if isinstance(conc, list):
+                    conc = '; '.join(str(c) for c in conc[:2])
+                date = str(src.get('kpdate', ''))[:10]
+                resp = src.get('respondent', '')
+                if isinstance(resp, list):
+                    resp = ', '.join(resp)
+
+                if docname and itemid:
+                    results.append({
+                        'title': f"TEDH: {docname} ({date})",
+                        'url': f"https://hudoc.echr.coe.int/eng?i={itemid}",
+                        'content': f"Sentencia TEDH contra {resp} ({date}): {str(conc)[:400]}"
+                    })
+    except Exception:
+        pass
+    return results
+
 # ── Búsqueda multi-fuente en paralelo ─────────────────────────────────────────
 def buscar_todas_fuentes(query: str, tipo: str) -> dict:
-    futures_map = {}
-
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        futures_map[ex.submit(buscar_tavily, query, tipo)] = "tavily"
-        futures_map[ex.submit(buscar_boe_directo, query)] = "boe"
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {
+            ex.submit(buscar_tavily,        query, tipo): "tavily",
+            ex.submit(buscar_boe_directo,   query):       "boe",
+        }
         if tipo in ("Legislación", "Consulta general"):
-            futures_map[ex.submit(buscar_eurlex_directo, query)] = "eurlex"
+            futures[ex.submit(buscar_eurlex_directo, query)] = "eurlex"
+        if tipo in ("Jurisprudencia", "Consulta general"):
+            futures[ex.submit(buscar_cendoj, query)] = "cendoj"
+            futures[ex.submit(buscar_tc,     query)] = "tc"
+            futures[ex.submit(buscar_hudoc,  query)] = "hudoc"
 
         raw = []
-        for future in as_completed(futures_map, timeout=18):
+        for future in as_completed(futures, timeout=20):
             try:
                 raw.extend(future.result())
             except Exception:
                 pass
 
-    # Deduplicar por URL
     seen, merged = set(), []
     for item in raw:
         url = item.get("url", "")
@@ -349,7 +470,7 @@ def buscar_todas_fuentes(query: str, tipo: str) -> dict:
             seen.add(url)
             merged.append(item)
 
-    return {"results": merged[:12]}
+    return {"results": merged[:14]}
 
 # ── Contexto para Claude ──────────────────────────────────────────────────────
 def construir_contexto(results: dict) -> str:
@@ -364,12 +485,11 @@ def construir_contexto(results: dict) -> str:
         ctx += "---\n"
     return ctx
 
-# ── Respuesta en streaming ────────────────────────────────────────────────────
+# ── Streaming ─────────────────────────────────────────────────────────────────
 def stream_respuesta(query: str, contexto: str):
     if not contexto.strip():
         yield "No he encontrado información suficiente sobre este tema en las fuentes consultadas."
         return
-
     with claude_client.messages.stream(
         model="claude-sonnet-4-6",
         max_tokens=2048,
@@ -386,17 +506,16 @@ def stream_respuesta(query: str, contexto: str):
 st.markdown("""
 <div class="header-box">
     <h1>⚖️ Asistente Jurídico IA</h1>
-    <p>Búsqueda en fuentes oficiales: BOE · EUR-Lex · Poder Judicial · Congreso · Legislación española</p>
+    <p>BOE · EUR-Lex · CENDOJ · Tribunal Constitucional · TEDH (HUDOC) · Legislación española</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar
 with st.sidebar:
     st.markdown("### ⚙️ Configuración")
     tipo = st.radio(
         "Tipo de búsqueda",
         ["Legislación", "Jurisprudencia", "Consulta general"],
-        help="Legislación: BOE, Congreso, EU\nJurisprudencia: Poder Judicial, Tribunales\nGeneral: todas las fuentes"
+        help="Legislación: BOE, EUR-Lex, Congreso…\nJurisprudencia: CENDOJ, TC, TEDH…\nGeneral: todas las fuentes"
     )
 
     badges = {"Legislación": "badge-leg", "Jurisprudencia": "badge-jur", "Consulta general": "badge-gen"}
@@ -422,11 +541,9 @@ with st.sidebar:
 </div>
 """, unsafe_allow_html=True)
 
-# Inicializar historial
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Mostrar historial
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -440,7 +557,6 @@ for msg in st.session_state.messages:
 </div>
 """, unsafe_allow_html=True)
 
-# Input
 if prompt := st.chat_input("Escribe tu consulta jurídica..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -449,19 +565,32 @@ if prompt := st.chat_input("Escribe tu consulta jurídica..."):
     with st.chat_message("assistant"):
         status = st.status("Buscando en fuentes jurídicas...", expanded=True)
         with status:
-            st.write("🔎 Consultando BOE (API) · EUR-Lex (API) · Tavily · Poder Judicial...")
-            results = buscar_todas_fuentes(prompt, tipo)
-            n = len(results.get("results", []))
+            fuentes_activas = []
+            fuentes_activas.append("BOE (API)")
+            if tipo in ("Legislación", "Consulta general"):
+                fuentes_activas.append("EUR-Lex (API)")
+            if tipo in ("Jurisprudencia", "Consulta general"):
+                fuentes_activas += ["CENDOJ (API)", "TC (API)", "HUDOC/TEDH (API)"]
+            fuentes_activas.append("Tavily")
+            st.write(f"🔎 Consultando: {' · '.join(fuentes_activas)}")
 
-            # Contar por fuente
-            boe_n = sum(1 for r in results["results"] if "boe.es" in r.get("url", ""))
-            el_n  = sum(1 for r in results["results"] if "eur-lex" in r.get("url", ""))
-            st.write(f"📄 {n} resultados — {boe_n} BOE · {el_n} EUR-Lex · {n-boe_n-el_n} otras fuentes")
+            results  = buscar_todas_fuentes(prompt, tipo)
+            n        = len(results.get("results", []))
+            boe_n    = sum(1 for r in results["results"] if "boe.es"                    in r.get("url", ""))
+            el_n     = sum(1 for r in results["results"] if "eur-lex"                   in r.get("url", ""))
+            cendoj_n = sum(1 for r in results["results"] if "poderjudicial.es"          in r.get("url", ""))
+            tc_n     = sum(1 for r in results["results"] if "tribunalconstitucional.es" in r.get("url", ""))
+            hudoc_n  = sum(1 for r in results["results"] if "hudoc.echr.coe.int"        in r.get("url", ""))
 
+            resumen = f"📄 {n} resultados — BOE:{boe_n} · EUR-Lex:{el_n} · CENDOJ:{cendoj_n} · TC:{tc_n} · TEDH:{hudoc_n} · otras:{n-boe_n-el_n-cendoj_n-tc_n-hudoc_n}"
+            st.write(resumen)
             st.write("🧠 Analizando contenido jurídico...")
             contexto = construir_contexto(results)
             st.write("✍️ Redactando respuesta...")
-        status.update(label=f"✅ {n} fuentes consultadas (BOE + EUR-Lex + web)", state="complete", expanded=False)
+        status.update(
+            label=f"✅ {n} fuentes — BOE · EUR-Lex · CENDOJ · TC · TEDH",
+            state="complete", expanded=False
+        )
 
         respuesta = st.write_stream(stream_respuesta(prompt, contexto))
 
