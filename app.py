@@ -101,19 +101,16 @@ tavily_client, claude_client = get_clients()
 # ── Dominios por tipo de búsqueda ─────────────────────────────────────────────
 DOMINIOS = {
     "Legislación": [
-        "boe.es", "congreso.es", "senado.es",
-        "mjusticia.gob.es", "eur-lex.europa.eu",
-        "agenciatributaria.es", "seg-social.es", "sepe.es"
+        "boe.es", "sepe.es",
+        "noticias.juridicas.com", "iberley.es", "abogacia.es"
     ],
     "Jurisprudencia": [
-        "poderjudicial.es", "mjusticia.gob.es",
-        "boe.es", "abogacia.es", "fiscal.es"
+        "poderjudicial.es", "boe.es",
+        "abogacia.es", "iberley.es", "noticias.juridicas.com"
     ],
     "Consulta general": [
-        "boe.es", "poderjudicial.es", "congreso.es",
-        "eur-lex.europa.eu", "mjusticia.gob.es",
-        "noticias.juridicas.com", "iberley.es",
-        "agenciatributaria.es", "seg-social.es"
+        "boe.es", "poderjudicial.es", "sepe.es",
+        "noticias.juridicas.com", "iberley.es", "abogacia.es"
     ]
 }
 
